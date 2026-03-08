@@ -1,14 +1,19 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock, vi } from "vitest";
+import type { SystemRunApprovalPlan } from "../infra/exec-approvals.js";
 import { saveExecApprovals } from "../infra/exec-approvals.js";
 import type { ExecHostResponse } from "../infra/exec-host.js";
-import {
-  handleSystemRunInvoke,
-  formatSystemRunAllowlistMissMessage,
-  type HandleSystemRunInvokeOptions,
-} from "./invoke-system-run.js";
+import { buildSystemRunApprovalPlan } from "./invoke-system-run-plan.js";
+import { handleSystemRunInvoke, formatSystemRunAllowlistMissMessage } from "./invoke-system-run.js";
+import type { HandleSystemRunInvokeOptions } from "./invoke-system-run.js";
+
+type MockedRunCommand = Mock<HandleSystemRunInvokeOptions["runCommand"]>;
+type MockedRunViaMacAppExecHost = Mock<HandleSystemRunInvokeOptions["runViaMacAppExecHost"]>;
+type MockedSendInvokeResult = Mock<HandleSystemRunInvokeOptions["sendInvokeResult"]>;
+type MockedSendExecFinishedEvent = Mock<HandleSystemRunInvokeOptions["sendExecFinishedEvent"]>;
+type MockedSendNodeEvent = Mock<HandleSystemRunInvokeOptions["sendNodeEvent"]>;
 
 describe("formatSystemRunAllowlistMissMessage", () => {
   it("returns legacy allowlist miss message by default", () => {
@@ -38,7 +43,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
   }
 
   function expectInvokeOk(
-    sendInvokeResult: ReturnType<typeof vi.fn>,
+    sendInvokeResult: MockedSendInvokeResult,
     params?: { payloadContains?: string },
   ) {
     expect(sendInvokeResult).toHaveBeenCalledWith(
@@ -52,7 +57,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
   }
 
   function expectInvokeErrorMessage(
-    sendInvokeResult: ReturnType<typeof vi.fn>,
+    sendInvokeResult: MockedSendInvokeResult,
     params: { message: string; exact?: boolean },
   ) {
     expect(sendInvokeResult).toHaveBeenCalledWith(
@@ -66,8 +71,8 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
   }
 
   function expectApprovalRequiredDenied(params: {
-    sendNodeEvent: ReturnType<typeof vi.fn>;
-    sendInvokeResult: ReturnType<typeof vi.fn>;
+    sendNodeEvent: MockedSendNodeEvent;
+    sendInvokeResult: MockedSendInvokeResult;
   }) {
     expect(params.sendNodeEvent).toHaveBeenCalledWith(
       expect.anything(),
@@ -80,8 +85,74 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     });
   }
 
+  function createMutableScriptOperandFixture(tmp: string): {
+    command: string[];
+    scriptPath: string;
+    initialBody: string;
+    changedBody: string;
+  } {
+    if (process.platform === "win32") {
+      const scriptPath = path.join(tmp, "run.js");
+      return {
+        command: [process.execPath, "./run.js"],
+        scriptPath,
+        initialBody: 'console.log("SAFE");\n',
+        changedBody: 'console.log("PWNED");\n',
+      };
+    }
+    const scriptPath = path.join(tmp, "run.sh");
+    return {
+      command: ["/bin/sh", "./run.sh"],
+      scriptPath,
+      initialBody: "#!/bin/sh\necho SAFE\n",
+      changedBody: "#!/bin/sh\necho PWNED\n",
+    };
+  }
+
   function buildNestedEnvShellCommand(params: { depth: number; payload: string }): string[] {
     return [...Array(params.depth).fill("/usr/bin/env"), "/bin/sh", "-c", params.payload];
+  }
+
+  function createMacExecHostSuccess(stdout = "app-ok"): ExecHostResponse {
+    return {
+      ok: true,
+      payload: {
+        success: true,
+        stdout,
+        stderr: "",
+        timedOut: false,
+        exitCode: 0,
+        error: null,
+      },
+    };
+  }
+
+  function createAllowlistOnMissApprovals(params?: {
+    autoAllowSkills?: boolean;
+    agents?: Parameters<typeof saveExecApprovals>[0]["agents"];
+  }): Parameters<typeof saveExecApprovals>[0] {
+    return {
+      version: 1,
+      defaults: {
+        security: "allowlist",
+        ask: "on-miss",
+        askFallback: "deny",
+        ...(params?.autoAllowSkills ? { autoAllowSkills: true } : {}),
+      },
+      agents: params?.agents ?? {},
+    };
+  }
+
+  function createInvokeSpies(params?: { runCommand?: MockedRunCommand }): {
+    runCommand: MockedRunCommand;
+    sendInvokeResult: MockedSendInvokeResult;
+    sendNodeEvent: MockedSendNodeEvent;
+  } {
+    return {
+      runCommand: params?.runCommand ?? vi.fn(async () => createLocalRunResult()),
+      sendInvokeResult: vi.fn(async () => {}),
+      sendNodeEvent: vi.fn(async () => {}),
+    };
   }
 
   async function withTempApprovalsHome<T>(params: {
@@ -129,7 +200,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
   }
 
   function expectCommandPinnedToCanonicalPath(params: {
-    runCommand: ReturnType<typeof vi.fn>;
+    runCommand: MockedRunCommand;
     expected: string;
     commandTail: string[];
     cwd?: string;
@@ -142,36 +213,109 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     );
   }
 
+  function resolveStatTargetPath(target: string | Buffer | URL | number): string {
+    if (typeof target === "string") {
+      return path.resolve(target);
+    }
+    if (Buffer.isBuffer(target)) {
+      return path.resolve(target.toString());
+    }
+    if (target instanceof URL) {
+      return path.resolve(target.pathname);
+    }
+    return path.resolve(String(target));
+  }
+
+  async function withMockedCwdIdentityDrift<T>(params: {
+    canonicalCwd: string;
+    driftDir: string;
+    stableHitsBeforeDrift?: number;
+    run: () => Promise<T>;
+  }): Promise<T> {
+    const stableHitsBeforeDrift = params.stableHitsBeforeDrift ?? 2;
+    const realStatSync = fs.statSync.bind(fs);
+    const baselineStat = realStatSync(params.canonicalCwd);
+    const driftStat = realStatSync(params.driftDir);
+    let canonicalHits = 0;
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation((...args) => {
+      const resolvedTarget = resolveStatTargetPath(args[0]);
+      if (resolvedTarget === params.canonicalCwd) {
+        canonicalHits += 1;
+        if (canonicalHits > stableHitsBeforeDrift) {
+          return driftStat;
+        }
+        return baselineStat;
+      }
+      return realStatSync(...args);
+    });
+    try {
+      return await params.run();
+    } finally {
+      statSpy.mockRestore();
+    }
+  }
+
   async function runSystemInvoke(params: {
     preferMacAppExecHost: boolean;
     runViaResponse?: ExecHostResponse | null;
     command?: string[];
+    rawCommand?: string | null;
+    systemRunPlan?: SystemRunApprovalPlan | null;
     cwd?: string;
     security?: "full" | "allowlist";
     ask?: "off" | "on-miss" | "always";
     approved?: boolean;
-    runCommand?: ReturnType<typeof vi.fn>;
-    runViaMacAppExecHost?: ReturnType<typeof vi.fn>;
-    sendInvokeResult?: ReturnType<typeof vi.fn>;
-    sendExecFinishedEvent?: ReturnType<typeof vi.fn>;
-    sendNodeEvent?: ReturnType<typeof vi.fn>;
+    runCommand?: HandleSystemRunInvokeOptions["runCommand"];
+    runViaMacAppExecHost?: HandleSystemRunInvokeOptions["runViaMacAppExecHost"];
+    sendInvokeResult?: HandleSystemRunInvokeOptions["sendInvokeResult"];
+    sendExecFinishedEvent?: HandleSystemRunInvokeOptions["sendExecFinishedEvent"];
+    sendNodeEvent?: HandleSystemRunInvokeOptions["sendNodeEvent"];
     skillBinsCurrent?: () => Promise<Array<{ name: string; resolvedPath: string }>>;
-  }) {
-    const runCommand =
-      params.runCommand ??
-      vi.fn(async (_command: string[], _cwd?: string, _env?: Record<string, string>) =>
-        createLocalRunResult(),
-      );
-    const runViaMacAppExecHost =
-      params.runViaMacAppExecHost ?? vi.fn(async () => params.runViaResponse ?? null);
-    const sendInvokeResult = params.sendInvokeResult ?? vi.fn(async () => {});
-    const sendExecFinishedEvent = params.sendExecFinishedEvent ?? vi.fn(async () => {});
-    const sendNodeEvent = params.sendNodeEvent ?? vi.fn(async () => {});
+  }): Promise<{
+    runCommand: MockedRunCommand;
+    runViaMacAppExecHost: MockedRunViaMacAppExecHost;
+    sendInvokeResult: MockedSendInvokeResult;
+    sendNodeEvent: MockedSendNodeEvent;
+    sendExecFinishedEvent: MockedSendExecFinishedEvent;
+  }> {
+    const runCommand: MockedRunCommand = vi.fn<HandleSystemRunInvokeOptions["runCommand"]>(
+      async () => createLocalRunResult(),
+    );
+    const runViaMacAppExecHost: MockedRunViaMacAppExecHost = vi.fn<
+      HandleSystemRunInvokeOptions["runViaMacAppExecHost"]
+    >(async () => params.runViaResponse ?? null);
+    const sendInvokeResult: MockedSendInvokeResult = vi.fn<
+      HandleSystemRunInvokeOptions["sendInvokeResult"]
+    >(async () => {});
+    const sendNodeEvent: MockedSendNodeEvent = vi.fn<HandleSystemRunInvokeOptions["sendNodeEvent"]>(
+      async () => {},
+    );
+    const sendExecFinishedEvent: MockedSendExecFinishedEvent = vi.fn<
+      HandleSystemRunInvokeOptions["sendExecFinishedEvent"]
+    >(async () => {});
+
+    if (params.runCommand !== undefined) {
+      runCommand.mockImplementation(params.runCommand);
+    }
+    if (params.runViaMacAppExecHost !== undefined) {
+      runViaMacAppExecHost.mockImplementation(params.runViaMacAppExecHost);
+    }
+    if (params.sendInvokeResult !== undefined) {
+      sendInvokeResult.mockImplementation(params.sendInvokeResult);
+    }
+    if (params.sendNodeEvent !== undefined) {
+      sendNodeEvent.mockImplementation(params.sendNodeEvent);
+    }
+    if (params.sendExecFinishedEvent !== undefined) {
+      sendExecFinishedEvent.mockImplementation(params.sendExecFinishedEvent);
+    }
 
     await handleSystemRunInvoke({
       client: {} as never,
       params: {
         command: params.command ?? ["echo", "ok"],
+        rawCommand: params.rawCommand,
+        systemRunPlan: params.systemRunPlan,
         cwd: params.cwd,
         approved: params.approved ?? false,
         sessionKey: "agent:main:main",
@@ -185,18 +329,22 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
       resolveExecAsk: () => params.ask ?? "off",
       isCmdExeInvocation: () => false,
       sanitizeEnv: () => undefined,
-      runCommand: runCommand as HandleSystemRunInvokeOptions["runCommand"],
-      runViaMacAppExecHost:
-        runViaMacAppExecHost as HandleSystemRunInvokeOptions["runViaMacAppExecHost"],
-      sendNodeEvent: sendNodeEvent as HandleSystemRunInvokeOptions["sendNodeEvent"],
+      runCommand,
+      runViaMacAppExecHost,
+      sendNodeEvent,
       buildExecEventPayload: (payload) => payload,
-      sendInvokeResult: sendInvokeResult as HandleSystemRunInvokeOptions["sendInvokeResult"],
-      sendExecFinishedEvent:
-        sendExecFinishedEvent as HandleSystemRunInvokeOptions["sendExecFinishedEvent"],
+      sendInvokeResult,
+      sendExecFinishedEvent,
       preferMacAppExecHost: params.preferMacAppExecHost,
     });
 
-    return { runCommand, runViaMacAppExecHost, sendInvokeResult, sendExecFinishedEvent };
+    return {
+      runCommand,
+      runViaMacAppExecHost,
+      sendInvokeResult,
+      sendNodeEvent,
+      sendExecFinishedEvent,
+    };
   }
 
   it("uses local execution by default when mac app exec host preference is disabled", async () => {
@@ -212,17 +360,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
   it("uses mac app exec host when explicitly preferred", async () => {
     const { runCommand, runViaMacAppExecHost, sendInvokeResult } = await runSystemInvoke({
       preferMacAppExecHost: true,
-      runViaResponse: {
-        ok: true,
-        payload: {
-          success: true,
-          stdout: "app-ok",
-          stderr: "",
-          timedOut: false,
-          exitCode: 0,
-          error: null,
-        },
-      },
+      runViaResponse: createMacExecHostSuccess(),
     });
 
     expect(runViaMacAppExecHost).toHaveBeenCalledWith({
@@ -244,17 +382,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     const { runViaMacAppExecHost } = await runSystemInvoke({
       preferMacAppExecHost: true,
       command: ["/bin/sh", "-lc", '$0 "$1"', "/usr/bin/touch", "/tmp/marker"],
-      runViaResponse: {
-        ok: true,
-        payload: {
-          success: true,
-          stdout: "app-ok",
-          stderr: "",
-          timedOut: false,
-          exitCode: 0,
-          error: null,
-        },
-      },
+      runViaResponse: createMacExecHostSuccess(),
     });
 
     expect(runViaMacAppExecHost).toHaveBeenCalledWith({
@@ -265,6 +393,81 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
       }),
     });
   });
+
+  const approvedEnvShellWrapperCases = [
+    {
+      name: "preserves wrapper argv for approved env shell commands in local execution",
+      preferMacAppExecHost: false,
+    },
+    {
+      name: "preserves wrapper argv for approved env shell commands in mac app exec host forwarding",
+      preferMacAppExecHost: true,
+    },
+  ] as const;
+
+  for (const testCase of approvedEnvShellWrapperCases) {
+    it.runIf(process.platform !== "win32")(testCase.name, async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-approved-wrapper-"));
+      const marker = path.join(tmp, "marker");
+      const attackerScript = path.join(tmp, "sh");
+      fs.writeFileSync(attackerScript, "#!/bin/sh\necho exploited > marker\n");
+      fs.chmodSync(attackerScript, 0o755);
+      const runCommand = vi.fn(async (argv: string[]) => {
+        if (argv[0] === "/bin/sh" && argv[1] === "sh" && argv[2] === "-c") {
+          fs.writeFileSync(marker, "rewritten");
+        }
+        return createLocalRunResult();
+      });
+      const sendInvokeResult = vi.fn(async () => {});
+      try {
+        const invoke = await runSystemInvoke({
+          preferMacAppExecHost: testCase.preferMacAppExecHost,
+          command: ["env", "sh", "-c", "echo SAFE"],
+          cwd: tmp,
+          approved: true,
+          security: "allowlist",
+          ask: "on-miss",
+          runCommand,
+          sendInvokeResult,
+          runViaResponse: testCase.preferMacAppExecHost
+            ? {
+                ok: true,
+                payload: {
+                  success: true,
+                  stdout: "app-ok",
+                  stderr: "",
+                  timedOut: false,
+                  exitCode: 0,
+                  error: null,
+                },
+              }
+            : undefined,
+        });
+
+        if (testCase.preferMacAppExecHost) {
+          const canonicalCwd = fs.realpathSync(tmp);
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expect(invoke.runViaMacAppExecHost).toHaveBeenCalledWith({
+            approvals: expect.anything(),
+            request: expect.objectContaining({
+              command: ["env", "sh", "-c", "echo SAFE"],
+              rawCommand: "echo SAFE",
+              cwd: canonicalCwd,
+            }),
+          });
+          expectInvokeOk(invoke.sendInvokeResult, { payloadContains: "app-ok" });
+          return;
+        }
+
+        const runArgs = vi.mocked(invoke.runCommand).mock.calls[0]?.[0] as string[] | undefined;
+        expect(runArgs).toEqual(["env", "sh", "-c", "echo SAFE"]);
+        expect(fs.existsSync(marker)).toBe(false);
+        expectInvokeOk(invoke.sendInvokeResult);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  }
 
   it("handles transparent env wrappers in allowlist mode", async () => {
     const { runCommand, sendInvokeResult } = await runSystemInvoke({
@@ -312,6 +515,39 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
             runCommand,
             expected,
             commandTail: ["-n", "SAFE"],
+          });
+          expectInvokeOk(sendInvokeResult);
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "accepts prepared plans after PATH-token hardening rewrites argv",
+    async () => {
+      await withPathTokenCommand({
+        tmpPrefix: "openclaw-prepare-run-path-pin-",
+        run: async ({ expected }) => {
+          const prepared = buildSystemRunApprovalPlan({
+            command: ["poccmd", "hello"],
+          });
+          expect(prepared.ok).toBe(true);
+          if (!prepared.ok) {
+            throw new Error("unreachable");
+          }
+
+          const { runCommand, sendInvokeResult } = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: prepared.plan.argv,
+            rawCommand: prepared.plan.rawCommand,
+            approved: true,
+            security: "full",
+            ask: "off",
+          });
+          expectCommandPinnedToCanonicalPath({
+            runCommand,
+            expected,
+            commandTail: ["hello"],
           });
           expectInvokeOk(sendInvokeResult);
         },
@@ -444,6 +680,114 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it("denies approval-based execution when cwd identity drifts before execution", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-approval-cwd-drift-"));
+    const fallback = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-approval-cwd-drift-alt-"));
+    const script = path.join(tmp, "run.sh");
+    fs.writeFileSync(script, "#!/bin/sh\necho SAFE\n");
+    fs.chmodSync(script, 0o755);
+    const canonicalCwd = fs.realpathSync(tmp);
+    try {
+      await withMockedCwdIdentityDrift({
+        canonicalCwd,
+        driftDir: fallback,
+        run: async () => {
+          const { runCommand, sendInvokeResult } = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["./run.sh"],
+            cwd: tmp,
+            approved: true,
+            security: "full",
+            ask: "off",
+          });
+          expect(runCommand).not.toHaveBeenCalled();
+          expectInvokeErrorMessage(sendInvokeResult, {
+            message: "SYSTEM_RUN_DENIED: approval cwd changed before execution",
+            exact: true,
+          });
+        },
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(fallback, { recursive: true, force: true });
+    }
+  });
+
+  it("denies approval-based execution when a script operand changes after approval", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-approval-script-drift-"));
+    const fixture = createMutableScriptOperandFixture(tmp);
+    fs.writeFileSync(fixture.scriptPath, fixture.initialBody);
+    if (process.platform !== "win32") {
+      fs.chmodSync(fixture.scriptPath, 0o755);
+    }
+    try {
+      const prepared = buildSystemRunApprovalPlan({
+        command: fixture.command,
+        cwd: tmp,
+      });
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) {
+        throw new Error("unreachable");
+      }
+
+      fs.writeFileSync(fixture.scriptPath, fixture.changedBody);
+      const { runCommand, sendInvokeResult } = await runSystemInvoke({
+        preferMacAppExecHost: false,
+        command: prepared.plan.argv,
+        rawCommand: prepared.plan.rawCommand,
+        systemRunPlan: prepared.plan,
+        cwd: prepared.plan.cwd ?? tmp,
+        approved: true,
+        security: "full",
+        ask: "off",
+      });
+
+      expect(runCommand).not.toHaveBeenCalled();
+      expectInvokeErrorMessage(sendInvokeResult, {
+        message: "SYSTEM_RUN_DENIED: approval script operand changed before execution",
+        exact: true,
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps approved shell script execution working when the script is unchanged", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-approval-script-stable-"));
+    const fixture = createMutableScriptOperandFixture(tmp);
+    fs.writeFileSync(fixture.scriptPath, fixture.initialBody);
+    if (process.platform !== "win32") {
+      fs.chmodSync(fixture.scriptPath, 0o755);
+    }
+    try {
+      const prepared = buildSystemRunApprovalPlan({
+        command: fixture.command,
+        cwd: tmp,
+      });
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) {
+        throw new Error("unreachable");
+      }
+
+      const { runCommand, sendInvokeResult } = await runSystemInvoke({
+        preferMacAppExecHost: false,
+        command: prepared.plan.argv,
+        rawCommand: prepared.plan.rawCommand,
+        systemRunPlan: prepared.plan,
+        cwd: prepared.plan.cwd ?? tmp,
+        approved: true,
+        security: "full",
+        ask: "off",
+      });
+
+      expect(runCommand).toHaveBeenCalledTimes(1);
+      expectInvokeOk(sendInvokeResult);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("denies ./sh wrapper spoof in allowlist on-miss mode before execution", async () => {
     const marker = path.join(os.tmpdir(), `openclaw-wrapper-spoof-${process.pid}-${Date.now()}`);
     const runCommand = vi.fn(async () => {
@@ -474,21 +818,10 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
   });
 
   it("denies ./skill-bin even when autoAllowSkills trust entry exists", async () => {
-    const runCommand = vi.fn(async () => createLocalRunResult());
-    const sendInvokeResult = vi.fn(async () => {});
-    const sendNodeEvent = vi.fn(async () => {});
+    const { runCommand, sendInvokeResult, sendNodeEvent } = createInvokeSpies();
 
     await withTempApprovalsHome({
-      approvals: {
-        version: 1,
-        defaults: {
-          security: "allowlist",
-          ask: "on-miss",
-          askFallback: "deny",
-          autoAllowSkills: true,
-        },
-        agents: {},
-      },
+      approvals: createAllowlistOnMissApprovals({ autoAllowSkills: true }),
       run: async ({ tempHome }) => {
         const skillBinPath = path.join(tempHome, "skill-bin");
         fs.writeFileSync(skillBinPath, "#!/bin/sh\necho should-not-run\n", { mode: 0o755 });
@@ -542,36 +875,42 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     }
   });
 
-  it("denies nested env shell payloads when wrapper depth is exceeded", async () => {
-    if (process.platform === "win32") {
-      return;
-    }
-    const runCommand = vi.fn(async () => {
-      throw new Error("runCommand should not be called for nested env depth overflow");
+  it("denies PowerShell encoded-command payloads in allowlist mode without explicit approval", async () => {
+    const { runCommand, sendInvokeResult, sendNodeEvent } = await runSystemInvoke({
+      preferMacAppExecHost: false,
+      security: "allowlist",
+      ask: "on-miss",
+      command: ["pwsh", "-EncodedCommand", "ZQBjAGgAbwAgAHAAdwBuAGUAZAA="],
     });
-    const sendInvokeResult = vi.fn(async () => {});
-    const sendNodeEvent = vi.fn(async () => {});
+    expect(runCommand).not.toHaveBeenCalled();
+    expectApprovalRequiredDenied({ sendNodeEvent, sendInvokeResult });
+  });
+
+  async function expectNestedEnvShellDenied(params: {
+    depth: number;
+    markerName: string;
+    errorLabel: string;
+  }) {
+    const { runCommand, sendInvokeResult, sendNodeEvent } = createInvokeSpies({
+      runCommand: vi.fn(async () => {
+        throw new Error(params.errorLabel);
+      }),
+    });
 
     await withTempApprovalsHome({
-      approvals: {
-        version: 1,
-        defaults: {
-          security: "allowlist",
-          ask: "on-miss",
-          askFallback: "deny",
-        },
+      approvals: createAllowlistOnMissApprovals({
         agents: {
           main: {
             allowlist: [{ pattern: "/usr/bin/env" }],
           },
         },
-      },
+      }),
       run: async ({ tempHome }) => {
-        const marker = path.join(tempHome, "pwned.txt");
+        const marker = path.join(tempHome, params.markerName);
         await runSystemInvoke({
           preferMacAppExecHost: false,
           command: buildNestedEnvShellCommand({
-            depth: 5,
+            depth: params.depth,
             payload: `echo PWNED > ${marker}`,
           }),
           security: "allowlist",
@@ -586,5 +925,27 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
 
     expect(runCommand).not.toHaveBeenCalled();
     expectApprovalRequiredDenied({ sendNodeEvent, sendInvokeResult });
+  }
+
+  it("denies env-wrapped shell payloads at the dispatch depth boundary", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    await expectNestedEnvShellDenied({
+      depth: 4,
+      markerName: "depth4-pwned.txt",
+      errorLabel: "runCommand should not be called for depth-boundary shell wrappers",
+    });
+  });
+
+  it("denies nested env shell payloads when wrapper depth is exceeded", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    await expectNestedEnvShellDenied({
+      depth: 5,
+      markerName: "pwned.txt",
+      errorLabel: "runCommand should not be called for nested env depth overflow",
+    });
   });
 });
