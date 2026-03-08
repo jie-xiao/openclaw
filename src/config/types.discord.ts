@@ -196,12 +196,6 @@ export type DiscordAccountConfig = {
   token?: string;
   /** HTTP(S) proxy URL for Discord gateway WebSocket connections. */
   proxy?: string;
-  /**
-   * Comma-separated list of domains to bypass the Discord proxy.
-   * Use this to exclude API providers (e.g., OpenAI, embedding services) from proxy.
-   * Example: "api.openai.com,open.bigmodel.cn"
-   */
-  proxyBypass?: string;
   /** Allow bot-authored messages to trigger replies (default: false). */
   allowBots?: boolean;
   /**
