@@ -16,8 +16,12 @@ export async function transcribeZaiAudio(
   const fetchFn = params.fetchFn ?? fetch;
   const baseUrl = normalizeBaseUrl(params.baseUrl, DEFAULT_ZAI_ASR_BASE_URL);
   
+  // Convert Buffer to Uint8Array for FormData compatibility
+  const uint8Array = new Uint8Array(params.buffer);
+  const blob = new Blob([uint8Array], { type: "audio/wav" });
+  
   const formData = new FormData();
-  formData.append("file", new Blob([params.buffer], { type: "audio/wav" }), "audio.wav");
+  formData.append("file", blob, "audio.wav");
   formData.append("model", "glm-asr");
   if (params.language?.trim()) {
     formData.append("language", params.language.trim());
