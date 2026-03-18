@@ -17,12 +17,18 @@ enum HostEnvSecurityPolicy {
         "BASH_ENV",
         "ENV",
         "GIT_EXTERNAL_DIFF",
+        "GIT_EXEC_PATH",
         "SHELL",
         "SHELLOPTS",
         "PS4",
         "GCONV_PATH",
         "IFS",
         "SSLKEYLOGFILE",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "PYTHONBREAKPOINT",
+        "DOTNET_STARTUP_HOOKS"
     ]
 
     static let blockedOverrideKeys: Set<String> = [
@@ -50,17 +56,17 @@ enum HostEnvSecurityPolicy {
         "OPENSSL_ENGINES",
         "PYTHONSTARTUP",
         "WGETRC",
-        "CURL_HOME",
+        "CURL_HOME"
     ]
 
     static let blockedOverridePrefixes: [String] = [
         "GIT_CONFIG_",
-        "NPM_CONFIG_",
+        "NPM_CONFIG_"
     ]
 
     static let blockedPrefixes: [String] = [
         "DYLD_",
         "LD_",
-        "BASH_FUNC_",
+        "BASH_FUNC_"
     ]
 }

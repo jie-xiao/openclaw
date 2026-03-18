@@ -1,0 +1,30 @@
+我发现了 web_fetch 工具访问百度时被 SSRF 防护阻止的问题。请帮我深入分析原因：
+
+## 问题现象
+- 使用 web_fetch 访问 https://www.baidu.com 时被阻止
+- 错误信息："Blocked: resolves to private/internal/special-use IP address"
+
+## 环境信息
+- Windows 10/11 系统
+- DNS 服务器配置为 IPv6: 240e:41:4200::1 (中国联通)
+- DNS 解析结果：
+  - IPv6: 240e:83:205:381:0:ff:b00f:96a2, 240e:83:205:1cd:0:ff:b0b8:dee9
+  - IPv4: 220.181.111.1, 220.181.111.232
+
+## 已验证的信息
+使用 ipaddr.js 验证所有地址：
+- 240e:83:205:381:0:ff:b00f:96a2 -> range: unicast
+- 240e:83:205:1cd:0:ff:b0b8:dee9 -> range: unicast
+- 220.181.111.1 -> range: unicast
+- 220.181.111.232 -> range: unicast
+
+这些地址都是 unicast（公网地址），不应该被阻止。
+
+## 请分析
+1. 检查 src/infra/net/ssrf.ts 中的 IP 分类逻辑
+2. 检查是否有特殊的 IPv6 前缀被误判
+3. 检查 DNS 解析过程中是否有边缘情况
+4. 重点检查 isPrivateIpAddress 和 isBlockedSpecialUseIpv6Address 函数
+5. 确认是否有 240e:: 网段的特殊处理
+
+请深入阅读代码并找出根本原因。

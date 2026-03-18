@@ -1,0 +1,169 @@
+menu "OpenClaw Node Configuration"
+
+    config GATEWAY_HOST
+        string "Gateway Host"
+        default "192.168.2.116"
+        help
+            The hostname or IP address of the OpenClaw gateway.
+
+    config GATEWAY_PORT
+        int "Gateway Port"
+        default 18789
+        help
+            The port number of the OpenClaw gateway.
+
+    config GATEWAY_AUTH_TOKEN
+        string "Gateway Auth Token"
+        default "f81890ae55aba1faa181e210005330eb08ca223673c2f596"
+        help
+            The authentication token for the gateway.
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "WK2.4G-1H1D1901"
+        help
+            WiFi network SSID.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default "chen580231"
+        help
+            WiFi network password.
+
+    config NODE_NAME
+        string "Node Name"
+        default "ESP32-S3 Node"
+        help
+            Display name for this node.
+
+    config NODE_VERSION
+        string "Node Version"
+        default "4.0.0"
+        help
+            Firmware version string.
+
+menu "Audio Configuration"
+
+    config ES7210_ENABLED
+        bool "Enable ES7210 Microphone"
+        default y
+        help
+            Enable ES7210 4-channel ADC for microphone input.
+
+    config ES8311_ENABLED
+        bool "Enable ES8311 Audio DAC"
+        default y
+        help
+            Enable ES8311 audio DAC for speaker output.
+
+    config AUDIO_SAMPLE_RATE
+        int "Audio Sample Rate"
+        default 16000
+        help
+            Audio sample rate in Hz.
+
+    config AUDIO_BITS_PER_SAMPLE
+        int "Bits Per Sample"
+        default 16
+        help
+            Audio bits per sample (16 or 32).
+
+    config AUDIO_DMA_BUF_COUNT
+        int "DMA Buffer Count"
+        default 8
+        help
+            Number of DMA buffers for I2S.
+
+    config AUDIO_DMA_BUF_LEN
+        int "DMA Buffer Length"
+        default 512
+        help
+            Length of each DMA buffer in bytes.
+
+endmenu
+
+menu "Pin Configuration"
+
+    config I2C_SDA_PIN
+        int "I2C SDA Pin"
+        default 1
+        help
+            GPIO pin for I2C SDA (ES7210/ES8311 config).
+
+    config I2C_SCL_PIN
+        int "I2C SCL Pin"
+        default 2
+        help
+            GPIO pin for I2C SCL (ES7210/ES8311 config).
+
+    config I2S_MCK_PIN
+        int "I2S MCK Pin"
+        default 38
+        help
+            GPIO pin for I2S Master Clock.
+
+    config I2S_BCK_PIN
+        int "I2S BCK Pin"
+        default 14
+        help
+            GPIO pin for I2S Bit Clock.
+
+    config I2S_WS_PIN
+        int "I2S WS/LRCK Pin"
+        default 13
+        help
+            GPIO pin for I2S Word Select/LRCK.
+
+    config I2S_DO_PIN
+        int "I2S Data Out Pin"
+        default 21
+        help
+            GPIO pin for I2S Data Out (to ES8311 DAC).
+
+    config I2S_DI_PIN
+        int "I2S Data In Pin"
+        default 12
+        help
+            GPIO pin for I2S Data In (from ES7210 ADC).
+
+endmenu
+
+menu "Camera Configuration"
+
+    config CAMERA_ENABLED
+        bool "Enable Camera"
+        default y
+        help
+            Enable camera support.
+
+    config CAMERA_XCLK_PIN
+        int "Camera XCLK Pin"
+        default 5
+        help
+            GPIO pin for camera XCLK.
+
+endmenu
+
+menu "Sensor Configuration"
+
+    config DHT_PIN
+        int "DHT Sensor Pin"
+        default 4
+        help
+            GPIO pin for DHT22 temperature/humidity sensor.
+
+    config LED_PIN
+        int "Status LED Pin"
+        default 2
+        help
+            GPIO pin for status LED.
+
+    config BUTTON_PIN
+        int "Button Pin"
+        default 0
+        help
+            GPIO pin for user button (BOOT button).
+
+endmenu
+
+endmenu
