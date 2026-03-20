@@ -45,10 +45,12 @@ function configureOptimizedRequestFn() {
     const req = require("request");
 
     // Create a wrapped request function with optimized agent settings
+    // Note: request.defaults() expects agent to be an object with http/https keys,
+    // NOT a function. Function-based agent selection is for native http.request() only.
     const optimizedRequest = req.defaults({
-      agent: (_parsedURL: any) => {
-        // Use HTTPS agent for https:// URLs, HTTP agent otherwise
-        return _parsedURL.protocol === "https:" ? keepAliveHttpsAgent : keepAliveAgent;
+      agent: {
+        http: keepAliveAgent,
+        https: keepAliveHttpsAgent,
       },
       forever: true,
       pool: {
