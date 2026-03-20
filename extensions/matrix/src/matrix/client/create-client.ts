@@ -19,18 +19,18 @@ import {
 // These settings are tuned for better performance in Windows environments
 const keepAliveAgent = new http.Agent({
   keepAlive: true,
-  keepAliveMsecs: 1000,
+  keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
-  timeout: 30000,
+  timeout: 60000,
 });
 
 const keepAliveHttpsAgent = new https.Agent({
   keepAlive: true,
-  keepAliveMsecs: 1000,
+  keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
-  timeout: 30000,
+  timeout: 60000,
 });
 
 // Flag to track if we've configured the request function

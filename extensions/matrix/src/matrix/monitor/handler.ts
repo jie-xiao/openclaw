@@ -244,22 +244,24 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         }
       }
 
-      let isDirectMessage = await directTracker.isDirectMessage({
-        roomId,
-        senderId,
-        selfUserId,
-      });
+      // Parallel: check if DM and resolve room config (both independent)
+      const [initialIsDirectMessage, roomConfigInfo] = await Promise.all([
+        directTracker.isDirectMessage({
+          roomId,
+          senderId,
+          selfUserId,
+        }),
+        Promise.resolve(
+          resolveMatrixRoomConfig({
+            rooms: roomsConfig,
+            roomId,
+            aliases: roomAliases,
+            name: roomName,
+          }),
+        ),
+      ]);
+      let isDirectMessage = initialIsDirectMessage;
 
-      // Resolve room config early so explicitly configured rooms can override DM classification.
-      // This ensures rooms in the groups config are always treated as groups regardless of
-      // member count or protocol-level DM flags. Only explicit matches (not wildcards) trigger
-      // the override to avoid breaking DM routing when a wildcard entry exists. (See #9106)
-      const roomConfigInfo = resolveMatrixRoomConfig({
-        rooms: roomsConfig,
-        roomId,
-        aliases: roomAliases,
-        name: roomName,
-      });
       if (shouldOverrideMatrixDmToGroup({ isDirectMessage, roomConfigInfo })) {
         logVerboseMessage(
           `matrix: overriding DM to group for configured room=${roomId} (${roomConfigInfo.matchKey})`,
@@ -302,9 +304,12 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
 
       const groupAllowFrom = cfg.channels?.matrix?.groupAllowFrom ?? [];
       // Parallel: fetch sender name and resolve access state
+      // Reuse pollSenderDisplayName if already fetched for poll events to avoid duplicate call
       const [senderName, { access, effectiveAllowFrom, effectiveGroupAllowFrom, groupAllowConfigured }] =
         await Promise.all([
-          getMemberDisplayName(roomId, senderId),
+          isPollEvent && pollSenderDisplayName
+            ? Promise.resolve(pollSenderDisplayName)
+            : getMemberDisplayName(roomId, senderId),
           resolveMatrixAccessState({
             isDirectMessage,
             resolvedAccountId,
