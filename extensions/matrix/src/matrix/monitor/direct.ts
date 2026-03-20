@@ -97,8 +97,11 @@ export function createDirectRoomTracker(client: MatrixClient, opts: DirectRoomTr
       }
 
       const selfUserId = params.selfUserId ?? (await ensureSelfUserId());
-      const directViaState =
-        (await hasDirectFlag(roomId, senderId)) || (await hasDirectFlag(roomId, selfUserId ?? ""));
+      const [senderIsDirect, selfIsDirect] = await Promise.all([
+        hasDirectFlag(roomId, senderId),
+        hasDirectFlag(roomId, selfUserId ?? ""),
+      ]);
+      const directViaState = senderIsDirect || selfIsDirect;
       if (directViaState) {
         log(`matrix: dm detected via member state room=${roomId}`);
         return true;

@@ -185,10 +185,8 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
       if (!senderId) {
         return;
       }
-      const selfUserId = await client.getUserId();
-      if (senderId === selfUserId) {
-        return;
-      }
+
+      // Early validation checks (synchronous)
       const eventTs = event.origin_server_ts;
       const eventAge = event.unsigned?.age;
       if (typeof eventTs === "number" && eventTs < startupMs - startupGraceMs) {
@@ -202,7 +200,16 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         return;
       }
 
-      const roomInfo = await getRoomInfo(roomId);
+      // Parallel fetch of selfUserId, roomInfo, and poll sender display name (if poll)
+      const [selfUserId, roomInfo, pollSenderDisplayName] = await Promise.all([
+        client.getUserId(),
+        getRoomInfo(roomId),
+        isPollEvent ? getMemberDisplayName(roomId, senderId) : Promise.resolve(undefined),
+      ]);
+
+      if (senderId === selfUserId) {
+        return;
+      }
       const roomName = roomInfo.name;
       const roomAliases = [roomInfo.canonicalAlias ?? "", ...roomInfo.altAliases].filter(Boolean);
 
@@ -214,8 +221,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           pollSummary.eventId = event.event_id ?? "";
           pollSummary.roomId = roomId;
           pollSummary.sender = senderId;
-          const senderDisplayName = await getMemberDisplayName(roomId, senderId);
-          pollSummary.senderName = senderDisplayName;
+          pollSummary.senderName = pollSenderDisplayName ?? senderId;
           const pollText = formatPollAsText(pollSummary);
           content = {
             msgtype: "m.text",
@@ -294,25 +300,29 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         }
       }
 
-      const senderName = await getMemberDisplayName(roomId, senderId);
+      const groupAllowFrom = cfg.channels?.matrix?.groupAllowFrom ?? [];
+      // Parallel: fetch sender name and resolve access state
+      const [senderName, { access, effectiveAllowFrom, effectiveGroupAllowFrom, groupAllowConfigured }] =
+        await Promise.all([
+          getMemberDisplayName(roomId, senderId),
+          resolveMatrixAccessState({
+            isDirectMessage,
+            resolvedAccountId,
+            dmPolicy,
+            groupPolicy,
+            allowFrom,
+            groupAllowFrom,
+            senderId,
+            readStoreForDmPolicy: pairing.readStoreForDmPolicy,
+          }),
+        ]);
+
       const senderUsername = resolveMatrixSenderUsername(senderId);
       const senderLabel = resolveMatrixInboundSenderLabel({
         senderName,
         senderId,
         senderUsername,
       });
-      const groupAllowFrom = cfg.channels?.matrix?.groupAllowFrom ?? [];
-      const { access, effectiveAllowFrom, effectiveGroupAllowFrom, groupAllowConfigured } =
-        await resolveMatrixAccessState({
-          isDirectMessage,
-          resolvedAccountId,
-          dmPolicy,
-          groupPolicy,
-          allowFrom,
-          groupAllowFrom,
-          senderId,
-          readStoreForDmPolicy: pairing.readStoreForDmPolicy,
-        });
 
       if (isDirectMessage) {
         const allowedDirectMessage = await enforceMatrixDirectMessageAccess({

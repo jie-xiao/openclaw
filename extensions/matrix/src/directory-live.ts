@@ -1,4 +1,5 @@
 import type { ChannelDirectoryEntry } from "../runtime-api.js";
+import { fetchWithSsrFGuard } from "../runtime-api.js";
 import { resolveMatrixAuth } from "./matrix/client.js";
 
 type MatrixUserResult = {
@@ -29,6 +30,8 @@ type MatrixDirectoryLiveParams = {
   limit?: number | null;
 };
 
+const MATRIX_DIRECTORY_CONCURRENCY_LIMIT = 5;
+
 type MatrixResolvedAuth = Awaited<ReturnType<typeof resolveMatrixAuth>>;
 
 async function fetchMatrixJson<T>(params: {
@@ -38,19 +41,52 @@ async function fetchMatrixJson<T>(params: {
   method?: "GET" | "POST";
   body?: unknown;
 }): Promise<T> {
-  const res = await fetch(`${params.homeserver}${params.path}`, {
-    method: params.method ?? "GET",
-    headers: {
-      Authorization: `Bearer ${params.accessToken}`,
-      "Content-Type": "application/json",
+  const { response: res, release } = await fetchWithSsrFGuard({
+    url: `${params.homeserver}${params.path}`,
+    init: {
+      method: params.method ?? "GET",
+      headers: {
+        Authorization: `Bearer ${params.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: params.body ? JSON.stringify(params.body) : undefined,
     },
-    body: params.body ? JSON.stringify(params.body) : undefined,
+    auditContext: "matrix.directory",
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Matrix API ${params.path} failed (${res.status}): ${text || "unknown error"}`);
+  try {
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Matrix API ${params.path} failed (${res.status}): ${text || "unknown error"}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    await release();
   }
-  return (await res.json()) as T;
+}
+
+function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return Promise.resolve([]);
+  }
+  const results: R[] = [];
+  results.length = items.length;
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  return Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const idx = nextIndex++;
+        if (idx >= items.length) {
+          return;
+        }
+        results[idx] = await fn(items[idx]);
+      }
+    }),
+  ).then(() => results);
 }
 
 function normalizeQuery(value?: string | null): string {
@@ -184,10 +220,22 @@ export async function listMatrixDirectoryGroupsLive(
     path: "/_matrix/client/v3/joined_rooms",
   });
   const rooms = joined.joined_rooms ?? [];
-  const results: ChannelDirectoryEntry[] = [];
 
-  for (const roomId of rooms) {
-    const name = await fetchMatrixRoomName(auth.homeserver, auth.accessToken, roomId);
+  const roomNames = await mapLimit(
+    rooms,
+    MATRIX_DIRECTORY_CONCURRENCY_LIMIT,
+    async (roomId) => {
+      try {
+        const name = await fetchMatrixRoomName(auth.homeserver, auth.accessToken, roomId);
+        return { roomId, name };
+      } catch {
+        return { roomId, name: null };
+      }
+    },
+  );
+
+  const results: ChannelDirectoryEntry[] = [];
+  for (const { roomId, name } of roomNames) {
     if (!name) {
       continue;
     }

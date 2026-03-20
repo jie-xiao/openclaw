@@ -6,8 +6,20 @@ export type MatrixRoomInfo = {
   altAliases: string[];
 };
 
+const MAX_CACHE_SIZE = 100;
+
 export function createMatrixRoomInfoResolver(client: MatrixClient) {
   const roomInfoCache = new Map<string, MatrixRoomInfo>();
+  const cacheKeys: string[] = [];
+
+  const evictOldest = () => {
+    if (cacheKeys.length > MAX_CACHE_SIZE) {
+      const oldestKey = cacheKeys.shift();
+      if (oldestKey) {
+        roomInfoCache.delete(oldestKey);
+      }
+    }
+  };
 
   const getRoomInfo = async (roomId: string): Promise<MatrixRoomInfo> => {
     const cached = roomInfoCache.get(roomId);
@@ -17,23 +29,21 @@ export function createMatrixRoomInfoResolver(client: MatrixClient) {
     let name: string | undefined;
     let canonicalAlias: string | undefined;
     let altAliases: string[] = [];
-    try {
-      const nameState = await client.getRoomStateEvent(roomId, "m.room.name", "").catch(() => null);
-      name = nameState?.name;
-    } catch {
-      // ignore
+    const [nameState, aliasState] = await Promise.allSettled([
+      client.getRoomStateEvent(roomId, "m.room.name", "").catch(() => null),
+      client.getRoomStateEvent(roomId, "m.room.canonical_alias", "").catch(() => null),
+    ]);
+    if (nameState.status === "fulfilled") {
+      name = nameState.value?.name;
     }
-    try {
-      const aliasState = await client
-        .getRoomStateEvent(roomId, "m.room.canonical_alias", "")
-        .catch(() => null);
-      canonicalAlias = aliasState?.alias;
-      altAliases = aliasState?.alt_aliases ?? [];
-    } catch {
-      // ignore
+    if (aliasState.status === "fulfilled") {
+      canonicalAlias = aliasState.value?.alias;
+      altAliases = aliasState.value?.alt_aliases ?? [];
     }
     const info = { name, canonicalAlias, altAliases };
     roomInfoCache.set(roomId, info);
+    cacheKeys.push(roomId);
+    evictOldest();
     return info;
   };
 
