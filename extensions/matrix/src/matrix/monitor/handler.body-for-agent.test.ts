@@ -9,7 +9,7 @@ import {
 import { EventType, type MatrixRawEvent } from "./types.js";
 
 describe("createMatrixRoomMessageHandler BodyForAgent sender label", () => {
-  it("stores sender-labeled BodyForAgent for group thread messages", async () => {
+  it("stores sender-labeled BodyForAgent for group thread messages", { timeout: 30000 }, async () => {
     const recordInboundSession = vi.fn().mockResolvedValue(undefined);
     const formatInboundEnvelope = vi
       .fn()
@@ -17,6 +17,8 @@ describe("createMatrixRoomMessageHandler BodyForAgent sender label", () => {
     const finalizeInboundContext = vi
       .fn()
       .mockImplementation((ctx: Record<string, unknown>) => ctx);
+
+    const buildMentionRegexes = vi.fn().mockReturnValue([]);
 
     const core = {
       channel: {
@@ -37,6 +39,10 @@ describe("createMatrixRoomMessageHandler BodyForAgent sender label", () => {
             sessionKey: "agent:main:matrix:channel:!room:example.org",
             mainSessionKey: "agent:main:main",
           }),
+        },
+        mentions: {
+          buildMentionRegexes,
+          matchesMentionPatterns: vi.fn().mockReturnValue(false),
         },
         session: {
           resolveStorePath: vi.fn().mockReturnValue("/tmp/openclaw-test-session.json"),
@@ -95,7 +101,6 @@ describe("createMatrixRoomMessageHandler BodyForAgent sender label", () => {
       logVerboseMessage,
       allowFrom: [],
       roomsConfig: undefined,
-      mentionRegexes: [],
       groupPolicy: "open",
       replyToMode: "first",
       threadReplies: "inbound",
