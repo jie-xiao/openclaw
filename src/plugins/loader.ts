@@ -202,9 +202,10 @@ const resolvePluginSdkAlias = (): string | null =>
 function buildPluginLoaderJitiOptions(aliasMap: Record<string, string>) {
   return {
     interopDefault: true,
-    // Prefer Node's native sync ESM loader for built dist/*.js modules so
-    // bundled plugins and plugin-sdk subpaths stay on the canonical module graph.
-    tryNative: true,
+    // NOTE: tryNative is disabled because it causes re-exported ESM modules
+    // to lose their exports. Using jiti's own module resolution ensures
+    // all exports are properly resolved.
+    tryNative: false,
     extensions: [".ts", ".tsx", ".mts", ".cts", ".mtsx", ".ctsx", ".js", ".mjs", ".cjs", ".json"],
     ...(Object.keys(aliasMap).length > 0
       ? {

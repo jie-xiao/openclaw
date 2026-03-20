@@ -12,7 +12,17 @@ function deriveMentionPatterns(identity?: { name?: string; emoji?: string }) {
   if (name) {
     const parts = name.split(/\s+/).filter(Boolean).map(escapeRegExp);
     const re = parts.length ? parts.join(String.raw`\s+`) : escapeRegExp(name);
-    patterns.push(String.raw`\b@?${re}\b`);
+    // Use Unicode-aware word boundary: \b doesn't work well with non-ASCII chars (Chinese, etc.)
+    // For patterns containing non-ASCII characters, use simpler matching
+    const hasNonAscii = /[^\x00-\x7F]/.test(name);
+    if (hasNonAscii) {
+      // For Unicode names: match the name anywhere with optional @ prefix
+      // Use lookahead/lookbehind for boundaries instead of \b
+      patterns.push(String.raw`@?${re}`);
+    } else {
+      // For ASCII names: use \b for word boundary
+      patterns.push(String.raw`\b@?${re}\b`);
+    }
   }
   const emoji = identity?.emoji?.trim();
   if (emoji) {
@@ -76,6 +86,38 @@ function cacheMentionRegexes(
   return [...regexes];
 }
 
+// Detect if pattern contains non-ASCII characters (Chinese, Japanese, Korean, etc.)
+function hasNonAsciiChars(pattern: string): boolean {
+  return /[^\x00-\x7F]/.test(pattern);
+}
+
+// Convert \b-based pattern to Unicode-friendly version
+// \b doesn't work properly with non-ASCII characters (Chinese, etc.)
+function unicodeizePattern(pattern: string): string {
+  // Check if pattern has non-ASCII characters
+  if (!hasNonAsciiChars(pattern)) {
+    return pattern; // ASCII pattern, keep as-is
+  }
+
+  // For patterns with non-ASCII chars, replace problematic \b with simpler matching
+  // In the pattern string, literal \b is represented as \\b (two chars: backslash + 'b')
+  let result = pattern;
+
+  // Remove leading \b@? or \b
+  if (result.startsWith('\\b@?')) {
+    result = result.slice(4); // remove \b@?
+  } else if (result.startsWith('\\b')) {
+    result = result.slice(2); // remove \b
+  }
+
+  // Remove trailing \b
+  if (result.endsWith('\\b')) {
+    result = result.slice(0, -2);
+  }
+
+  return result;
+}
+
 function compileMentionPatternsCached(params: {
   patterns: string[];
   flags: string;
@@ -85,13 +127,17 @@ function compileMentionPatternsCached(params: {
   if (params.patterns.length === 0) {
     return [];
   }
-  const cacheKey = `${params.flags}\u001e${params.patterns.join("\u001f")}`;
+
+  // Preprocess patterns to handle Unicode characters
+  const processedPatterns = params.patterns.map(p => unicodeizePattern(p));
+
+  const cacheKey = `${params.flags}\u001e${processedPatterns.join("\u001f")}`;
   const cached = params.cache.get(cacheKey);
   if (cached) {
     return [...cached];
   }
 
-  const compiled = compileConfigRegexes(params.patterns, params.flags);
+  const compiled = compileConfigRegexes(processedPatterns, params.flags);
   if (params.warnRejected) {
     for (const rejected of compiled.rejected) {
       warnRejectedMentionPattern(rejected.pattern, rejected.flags, rejected.reason);
