@@ -1,4 +1,4 @@
-import type { MatrixClient } from "@vector-im/matrix-bot-sdk";
+import type { MatrixClient } from "../sdk.js";
 
 export type MatrixRoomInfo = {
   name?: string;
@@ -6,78 +6,101 @@ export type MatrixRoomInfo = {
   altAliases: string[];
 };
 
-const MAX_CACHE_SIZE = 100;
-const MEMBER_CACHE_TTL_MS = 30_000; // Member display names cache TTL
+const MAX_TRACKED_ROOM_INFO = 1024;
+const MAX_TRACKED_MEMBER_DISPLAY_NAMES = 4096;
 
-type MemberCacheEntry = {
-  displayName: string;
-  ts: number;
-};
+function rememberBounded<T>(map: Map<string, T>, key: string, value: T, maxEntries: number): void {
+  map.set(key, value);
+  if (map.size > maxEntries) {
+    const oldest = map.keys().next().value;
+    if (typeof oldest === "string") {
+      map.delete(oldest);
+    }
+  }
+}
 
 export function createMatrixRoomInfoResolver(client: MatrixClient) {
-  const roomInfoCache = new Map<string, MatrixRoomInfo>();
-  const cacheKeys = new Set<string>();
+  const roomNameCache = new Map<string, string | undefined>();
+  const roomAliasCache = new Map<string, Pick<MatrixRoomInfo, "canonicalAlias" | "altAliases">>();
+  const memberDisplayNameCache = new Map<string, string>();
 
-  const evictOldest = () => {
-    if (cacheKeys.size > MAX_CACHE_SIZE) {
-      // Simple FIFO eviction: pick oldest entry
-      const oldestKey = cacheKeys.values().next().value;
-      if (oldestKey) {
-        cacheKeys.delete(oldestKey);
-        roomInfoCache.delete(oldestKey);
-      }
+  const getRoomName = async (roomId: string): Promise<string | undefined> => {
+    if (roomNameCache.has(roomId)) {
+      return roomNameCache.get(roomId);
     }
+    let name: string | undefined;
+    try {
+      const nameState = await client.getRoomStateEvent(roomId, "m.room.name", "").catch(() => null);
+      if (nameState && typeof nameState.name === "string") {
+        name = nameState.name;
+      }
+    } catch {
+      // ignore
+    }
+    rememberBounded(roomNameCache, roomId, name, MAX_TRACKED_ROOM_INFO);
+    return name;
   };
 
-  const getRoomInfo = async (roomId: string): Promise<MatrixRoomInfo> => {
-    const cached = roomInfoCache.get(roomId);
+  const getRoomAliases = async (
+    roomId: string,
+  ): Promise<Pick<MatrixRoomInfo, "canonicalAlias" | "altAliases">> => {
+    const cached = roomAliasCache.get(roomId);
     if (cached) {
       return cached;
     }
-
-    // Parallel fetch of room name and alias state events
-    const [nameState, aliasState] = await Promise.allSettled([
-      client.getRoomStateEvent(roomId, "m.room.name", ""),
-      client.getRoomStateEvent(roomId, "m.room.canonical_alias", ""),
-    ]);
-
-    let name: string | undefined;
     let canonicalAlias: string | undefined;
     let altAliases: string[] = [];
-
-    if (nameState.status === "fulfilled") {
-      name = nameState.value?.name;
+    try {
+      const aliasState = await client
+        .getRoomStateEvent(roomId, "m.room.canonical_alias", "")
+        .catch(() => null);
+      if (aliasState && typeof aliasState.alias === "string") {
+        canonicalAlias = aliasState.alias;
+      }
+      const rawAliases = aliasState?.alt_aliases;
+      if (Array.isArray(rawAliases)) {
+        altAliases = rawAliases.filter((entry): entry is string => typeof entry === "string");
+      }
+    } catch {
+      // ignore
     }
-    if (aliasState.status === "fulfilled") {
-      canonicalAlias = aliasState.value?.alias;
-      altAliases = aliasState.value?.alt_aliases ?? [];
-    }
-
-    const info = { name, canonicalAlias, altAliases };
-    roomInfoCache.set(roomId, info);
-    cacheKeys.add(roomId);
-    evictOldest();
+    const info = { canonicalAlias, altAliases };
+    rememberBounded(roomAliasCache, roomId, info, MAX_TRACKED_ROOM_INFO);
     return info;
   };
 
-  // Member display name cache to avoid redundant API calls
-  const memberCache = new Map<string, MemberCacheEntry>();
+  const getRoomInfo = async (
+    roomId: string,
+    opts: { includeAliases?: boolean } = {},
+  ): Promise<MatrixRoomInfo> => {
+    const name = await getRoomName(roomId);
+    if (!opts.includeAliases) {
+      return { name, altAliases: [] };
+    }
+    const aliases = await getRoomAliases(roomId);
+    return { name, ...aliases };
+  };
 
   const getMemberDisplayName = async (roomId: string, userId: string): Promise<string> => {
     const cacheKey = `${roomId}:${userId}`;
-    const now = Date.now();
-
-    // Check cache
-    const cached = memberCache.get(cacheKey);
-    if (cached && now - cached.ts < MEMBER_CACHE_TTL_MS) {
-      return cached.displayName;
+    const cached = memberDisplayNameCache.get(cacheKey);
+    if (cached) {
+      return cached;
     }
-
     try {
-      const memberState = await client.getRoomStateEvent(roomId, "m.room.member", userId);
-      const displayName = memberState?.displayname ?? userId;
-      memberCache.set(cacheKey, { displayName, ts: now });
-      return displayName;
+      const memberState = await client
+        .getRoomStateEvent(roomId, "m.room.member", userId)
+        .catch(() => null);
+      if (memberState && typeof memberState.displayname === "string") {
+        rememberBounded(
+          memberDisplayNameCache,
+          cacheKey,
+          memberState.displayname,
+          MAX_TRACKED_MEMBER_DISPLAY_NAMES,
+        );
+        return memberState.displayname;
+      }
+      return userId;
     } catch {
       return userId;
     }
