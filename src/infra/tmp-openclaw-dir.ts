@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { tmpdir as getOsTmpDir } from "node:os";
+import os from "node:os";
 import path from "node:path";
 
 // On Windows, resolve /tmp/openclaw to a stable absolute path based on system temp dir
@@ -61,7 +61,7 @@ export function resolvePreferredOpenClawTmpDir(
         return undefined;
       }
     });
-  const tmpdir = typeof options.tmpdir === "function" ? options.tmpdir : getOsTmpDir;
+  const tmpdir = typeof options.tmpdir === "function" ? options.tmpdir : os.tmpdir;
   const uid = getuid();
 
   const isSecureDirForUser = (st: { mode?: number; uid?: number }): boolean => {

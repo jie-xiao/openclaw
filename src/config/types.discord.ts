@@ -189,6 +189,19 @@ export type DiscordSlashCommandConfig = {
   ephemeral?: boolean;
 };
 
+export type DiscordAutoPresenceConfig = {
+  enabled?: boolean;
+  intervalMs?: number;
+  minUpdateIntervalMs?: number;
+  healthyText?: string;
+  degradedText?: string;
+  exhaustedText?: string;
+};
+
+export type DiscordInboundWorkerConfig = {
+  runTimeoutMs?: number;
+};
+
 export type DiscordAccountConfig = {
   /** Optional display name for this account (used in CLI/UI lists). */
   name?: string;
@@ -205,8 +218,10 @@ export type DiscordAccountConfig = {
   token?: string;
   /** HTTP(S) proxy URL for Discord gateway WebSocket connections. */
   proxy?: string;
-  /** Allow bot-authored messages to trigger replies (default: false). */
-  allowBots?: boolean;
+  /** Comma-separated domains to bypass proxy for Discord connections. */
+  proxyBypass?: string;
+  /** Allow bot-authored messages to trigger replies (default: false). Set to "mentions" to only allow bot replies when mentioned. */
+  allowBots?: boolean | "mentions";
   /**
    * Break-glass override: allow mutable identity matching (names/tags/slugs) in allowlists.
    * Default behavior is ID-only matching.
@@ -327,6 +342,10 @@ export type DiscordAccountConfig = {
     /** Max concurrent event processing operations. Default: 50. */
     maxConcurrency?: number;
   };
+  /** Auto-presence controller configuration for dynamic bot status. */
+  autoPresence?: DiscordAutoPresenceConfig;
+  /** Inbound worker configuration for message processing. */
+  inboundWorker?: DiscordInboundWorkerConfig;
 };
 
 export type DiscordConfig = {
