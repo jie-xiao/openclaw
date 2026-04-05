@@ -143,6 +143,26 @@ function depsInstalled(kind) {
   }
 }
 
+/**
+ * Resolve the binary entry point for a given npm package using Node's module
+ * resolution (which walks up to the workspace root under node-linker=hoisted).
+ * This avoids relying on pnpm's lifecycle script runner, which may fail to
+ * locate bins that are hoisted to the root node_modules.
+ */
+function resolveBin(pkgName) {
+  const require = createRequire(path.join(uiDir, "package.json"));
+  const pkgJsonPath = require.resolve(`${pkgName}/package.json`);
+  const pkgRoot = path.dirname(pkgJsonPath);
+  const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+  const binMap =
+    typeof pkgJson.bin === "string" ? { [pkgName]: pkgJson.bin } : pkgJson.bin;
+  const binRel = binMap[pkgName];
+  if (!binRel) {
+    throw new Error(`Package "${pkgName}" has no bin entry "${pkgName}"`);
+  }
+  return path.resolve(pkgRoot, binRel);
+}
+
 function resolveScriptAction(action) {
   if (action === "install") {
     return null;
@@ -184,12 +204,22 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   if (!depsInstalled(action === "test" ? "test" : "build")) {
-    const installEnv = process.env;
-    const installArgs = ["install"];
-    runSync(runner.cmd, installArgs, installEnv);
+    runSync(runner.cmd, ["install"]);
   }
 
-  run(runner.cmd, ["run", script, ...rest]);
+  // Resolve and invoke the tool binary directly.  pnpm's lifecycle script
+  // runner resolves bins from <pkg>/node_modules, which breaks under
+  // node-linker=hoisted when the bin lives in the workspace root instead.
+  const toolPkg = script === "test" ? "vitest" : "vite";
+  const toolBin = resolveBin(toolPkg);
+  const toolArgs = [];
+  if (script === "build") {
+    toolArgs.push("build");
+  } else if (script === "test") {
+    toolArgs.push("run");
+  }
+  toolArgs.push(...rest);
+  run(process.execPath, [toolBin, ...toolArgs]);
 }
 
 const isDirectExecution = (() => {
